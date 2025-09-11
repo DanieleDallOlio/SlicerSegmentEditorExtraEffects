@@ -75,7 +75,6 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorLabelEffect):
 
         if eventId == vtk.vtkCommand.LeftButtonPressEvent and not anyModifierKeyPressed:
             # Start drag
-            print("Start drag")
             confirmedEditingAllowed = self.scriptedEffect.confirmCurrentSegmentVisible()
             if confirmedEditingAllowed in [self.scriptedEffect.NotConfirmed,
                                            self.scriptedEffect.ConfirmedWithDialog]:
@@ -85,7 +84,6 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorLabelEffect):
             pipeline.actionState = "dragging"
             viewWidget.setCursor(qt.QCursor(qt.Qt.ClosedHandCursor))
             self.startRAS = self.xyToRas(callerInteractor.GetEventPosition(), viewWidget)
-            print(self.startRAS)
             # Store initial geometry of the selected segment
             segmentationNode = self.scriptedEffect.parameterSetNode().GetSegmentationNode()
             selectedSegmentID = self.scriptedEffect.parameterSetNode().GetSelectedSegmentID()
@@ -98,26 +96,21 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorLabelEffect):
 
         elif eventId == vtk.vtkCommand.MouseMoveEvent and pipeline.actionState == "dragging":
             # Update drag preview
-            print("Update drag preview")
             currentRAS = self.xyToRas(callerInteractor.GetEventPosition(), viewWidget)
-            # print(currentRAS)
             translation = [currentRAS[i] - self.startRAS[i] for i in range(3)]
 
             pipeline.updatePreview(translation)
             abortEvent = True
         elif eventId == vtk.vtkCommand.LeftButtonReleaseEvent and pipeline.actionState == "dragging":
             # Finish drag
-            print("Finish drag")
             segmentationNode = self.scriptedEffect.parameterSetNode().GetSegmentationNode()
             selectedSegmentID = self.scriptedEffect.parameterSetNode().GetSelectedSegmentID()
-            print(selectedSegmentID)
             pipeline.apply(segmentationNode, selectedSegmentID)
             pipeline.actionState = ""
             viewWidget.setCursor(qt.QCursor(qt.Qt.OpenHandCursor))
             abortEvent = True
 
         elif eventId == vtk.vtkCommand.RightButtonPressEvent and pipeline.actionState == "dragging":
-            print("Cancel with right-click")
             # Cancel with right-click
             pipeline.cancelPreview()
             pipeline.actionState = ""
@@ -264,7 +257,26 @@ class DragPipeline:
                 segmentationNode, selectedSegmentID, segLabelmap
         )
 
-        # Build a world-space/ RAS translation transform
+        # segment = segmentation.GetSegment(selectedSegmentID)
+        # if not segment:
+        #     logging.warning(f"Segment {selectedSegmentID} not found")
+        #     return
+
+        # repName = slicer.vtkSegmentationConverter.GetSegmentationBinaryLabelmapRepresentationName()
+        # if not segment.GetRepresentation(repName):
+        #     logging.warning(f"Segment {selectedSegmentID} has no binary labelmap representation")
+        #     return
+        #
+        # segLabelmap = slicer.vtkOrientedImageData.SafeDownCast(segment.GetRepresentation(repName))
+        # if segLabelmap is None:
+        #     logging.warning(f"Failed to retrieve vtkOrientedImageData for segment {selectedSegmentID}")
+        #     return
+        #
+        # if segLabelmap.GetDimensions()[0] == 0:
+        #     # Segment is empty
+        #     return
+
+        # # Build a world-space/ RAS translation transform
         transform = vtk.vtkTransform()
         transform.Identity()
         transform.Translate(self.translationVectorRAS)
@@ -286,12 +298,30 @@ class DragPipeline:
         ijkTransform.Concatenate(ijkToRasMatrix)
         ijkTransform.Inverse()
 
+
         slicer.vtkOrientedImageDataResample.TransformOrientedImage(
                         segLabelmap,
-                        ijkTransform
+                        ijkTransform # transform
                     )
 
+        # reslice = vtk.vtkImageReslice()
+        # reslice.SetInputData(segLabelmap)
+        # reslice.SetResliceTransform(ijkTransform)
+        # reslice.SetInterpolationModeToNearestNeighbor()
+        # # reslice.SetOutputSpacing(segLabelmap.GetSpacing())
+        # # reslice.SetOutputOrigin(segLabelmap.GetOrigin())
+        # # reslice.SetOutputExtent(segLabelmap.GetExtent())
+        # reslice.Update()
+
+
+        # reslicedImage = reslice.GetOutput()
+        #
+        # translatedLabelmap = slicer.vtkOrientedImageData()
+        # translatedLabelmap.DeepCopy(reslicedImage)
+        # translatedLabelmap.CopyDirections(segLabelmap)
+
         self.scriptedEffect.saveStateForUndo()
+        # self.scriptedEffect.modifySelectedSegmentByLabelmap(translatedLabelmap, slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeSet)
 
         slicer.vtkSlicerSegmentationsModuleLogic.SetBinaryLabelmapToSegment(
             segLabelmap, segmentationNode, selectedSegmentID, slicer.vtkSlicerSegmentationsModuleLogic.MODE_REPLACE
