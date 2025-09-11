@@ -31,6 +31,7 @@ add_subdirectory(SegmentEditorDrawTube)
 add_subdirectory(SegmentEditorSplitVolume)
 add_subdirectory(SegmentEditorLocalThreshold)
 add_subdirectory(SegmentEditorEngrave)
+add_subdirectory(SegmentEditorDrag)
 ## NEXT_MODULE
 
 #-----------------------------------------------------------------------------
