@@ -5,6 +5,7 @@ import vtk
 import slicer
 from slicer.i18n import tr as _
 from SegmentEditorEffects import *
+import slicer.util
 
 
 class SegmentEditorEffect(AbstractScriptedSegmentEditorLabelEffect):
@@ -31,23 +32,42 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorLabelEffect):
         return qt.QIcon()
 
     def helpText(self):
-        return "<html>" + _("""Drag segment in slice viewers<br>.
+        return "<html>" + _("""Drag segment in slice viewers<br>
 <p><ul style="margin: 0">
-<li><b>Left-button drag-and-drop:</b> dragging taking place.
-<li><b>x:</b> delete last point.
-</ul><p>""")
-
-    def deactivate(self):
-        # Remove drag pipelines
-        for sliceWidget, pipeline in self.dragPipelines.items():
-            self.scriptedEffect.removeActor2D(sliceWidget, pipeline.actor)
-        self.dragPipelines = {}
+<li><b>Left-button drag-and-drop:</b> move the selected segment.
+<li><b>Right-click:</b> cancel the drag preview.
+</ul></p>
+<p><b>Copy to frames (Sequences):</b><br>
+If the segmentation is part of a sequence, you can copy the <b>current segment</b> to a frame range using the <b>Copy</b> button.</p>
+</html>""")
 
     def createCursor(self, widget):
       return qt.QCursor(qt.Qt.OpenHandCursor)
 
     def setupOptionsFrame(self):
-        pass
+      layout = self.scriptedEffect.optionsFrame().layout()
+      self.propagateButton = qt.QPushButton(_("Copy"))
+      self.propagateButton.enabled = False
+      layout.addWidget(self.propagateButton)
+      self.propagateButton.clicked.connect(self.onPropagateButtonClicked)
+      rangeWidget = qt.QWidget()
+      rangeLayout = qt.QHBoxLayout(rangeWidget)
+      rangeLayout.setContentsMargins(0, 0, 0, 0)
+      self.startFrameSpinBox = qt.QSpinBox()
+      self.startFrameSpinBox.setMinimum(0)
+      self.startFrameSpinBox.setPrefix(_("Start: "))
+      rangeLayout.addWidget(self.startFrameSpinBox)
+      self.endFrameSpinBox = qt.QSpinBox()
+      self.endFrameSpinBox.setMinimum(0)
+      self.endFrameSpinBox.setPrefix(_("End: "))
+      rangeLayout.addWidget(self.endFrameSpinBox)
+      layout.addRow(rangeWidget)
+      self.startFrameSpinBox.enabled = False
+      self.endFrameSpinBox.enabled = False
+      self.updatePropagationUi()
+      self._endEdited = False
+      self.endFrameSpinBox.valueChanged.connect(self._onEndChanged)
+      self.endFrameSpinBox.valueChanged.connect(lambda _: setattr(self, "_endEdited", True))
 
     def pipelineForWidget(self, sliceWidget):
         if sliceWidget in self.dragPipelines:
@@ -61,6 +81,15 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorLabelEffect):
         self.scriptedEffect.addActor2D(sliceWidget, pipeline.actor)
         self.dragPipelines[sliceWidget] = pipeline
         return pipeline
+
+    def _onEndChanged(self, value):
+      if not hasattr(self, "startFrameSpinBox"):
+        return
+      startVal = self.startFrameSpinBox.value
+      if value < startVal:
+        self.endFrameSpinBox.blockSignals(True)
+        self.endFrameSpinBox.value = startVal
+        self.endFrameSpinBox.blockSignals(False)
 
     def processInteractionEvents(self, callerInteractor, eventId, viewWidget):
         abortEvent = False
@@ -122,6 +151,170 @@ class SegmentEditorEffect(AbstractScriptedSegmentEditorLabelEffect):
 
         pipeline.positionActors()
         return abortEvent
+
+    def getSegmentationSequenceNode(self, segmentationNode):
+      scene = slicer.mrmlScene
+      sequenceNodes = scene.GetNodesByClass("vtkMRMLSequenceNode")
+      sequenceNodes.UnRegister(scene)
+      for i in range(sequenceNodes.GetNumberOfItems()):
+        seqNode = sequenceNodes.GetItemAsObject(i)
+        dataNode = seqNode.GetNthDataNode(0)
+        if dataNode and dataNode.GetID() == segmentationNode.GetID():
+          return seqNode
+      return None
+
+    def onPropagateButtonClicked(self):
+      parameterNode = self.scriptedEffect.parameterSetNode()
+      segmentationNode = parameterNode.GetSegmentationNode()
+      segmentID = parameterNode.GetSelectedSegmentID()
+      if not segmentationNode or not segmentID:
+        return
+      sequenceNode = self.getSegmentationSequenceNode(segmentationNode)
+      if not sequenceNode:
+        return
+      browser = slicer.modules.sequences.logic().GetFirstBrowserNodeForSequenceNode(sequenceNode)
+      if not browser:
+        return
+      sourceIndex = browser.GetSelectedItemNumber()
+
+      self.scriptedEffect.saveStateForUndo()
+      self.propagateSegmentOverRange(
+          sequenceNode,
+          sourceIndex,
+          self.startFrameSpinBox.value,
+          self.endFrameSpinBox.value,
+          segmentID
+      )
+
+    def propagateSegmentOverRange(
+        self,
+        sequenceNode,
+        sourceIndex,
+        startIndex,
+        endIndex,
+        segmentID
+    ):
+      logic = slicer.vtkSlicerSegmentationsModuleLogic()
+      sourceSegmentation = sequenceNode.GetNthDataNode(sourceIndex)
+      if not sourceSegmentation:
+        return
+      # Extract source segment labelmap
+      sourceLabelmap = slicer.vtkOrientedImageData()
+      logic.GetSegmentBinaryLabelmapRepresentation(
+          sourceSegmentation,
+          segmentID,
+          sourceLabelmap
+      )
+      for i in range(startIndex, endIndex + 1):
+        if i == sourceIndex:
+            continue
+        targetSegmentation = sequenceNode.GetNthDataNode(i)
+        if not targetSegmentation:
+            continue
+        if not targetSegmentation.GetSegmentation().GetSegment(segmentID):
+            continue
+        copiedLabelmap = slicer.vtkOrientedImageData()
+        copiedLabelmap.DeepCopy(sourceLabelmap)
+        logic.SetBinaryLabelmapToSegment(
+            copiedLabelmap,
+            targetSegmentation,
+            segmentID,
+            logic.MODE_REPLACE
+        )
+
+    def updatePropagationUi(self):
+      # Options frame may not be built yet
+      if not (hasattr(self, "propagateButton") and hasattr(self, "startFrameSpinBox") and hasattr(self, "endFrameSpinBox")):
+        return
+
+      parameterNode = self.scriptedEffect.parameterSetNode()
+      if not parameterNode:
+        self.propagateButton.enabled = False
+        self.startFrameSpinBox.enabled = False
+        self.endFrameSpinBox.enabled = False
+        return
+
+      segmentationNode = parameterNode.GetSegmentationNode()
+      if not segmentationNode:
+        self.propagateButton.enabled = False
+        self.startFrameSpinBox.enabled = False
+        self.endFrameSpinBox.enabled = False
+        return
+
+      sequenceNode = self.getSegmentationSequenceNode(segmentationNode)
+      browser = slicer.modules.sequences.logic().GetFirstBrowserNodeForSequenceNode(sequenceNode) if sequenceNode else None
+
+      if not (sequenceNode and browser):
+        # Disable everything if no corresponding sequence/browser
+        self.propagateButton.enabled = False
+        self.startFrameSpinBox.enabled = False
+        self.endFrameSpinBox.enabled = False
+        self._endEdited = False
+        return
+
+      if getattr(self, "_observedBrowserNode", None) != browser:
+        self._observedBrowserNode = browser
+        self._endEdited = False
+      self.propagateButton.enabled = True
+      self.startFrameSpinBox.enabled = True
+      self.endFrameSpinBox.enabled = True
+      endIndex = sequenceNode.GetNumberOfDataNodes() - 1
+      self.startFrameSpinBox.maximum = endIndex
+      self.endFrameSpinBox.maximum = endIndex
+      sourceIndex = browser.GetSelectedItemNumber()
+      defaultStart = min(sourceIndex + 1, endIndex)
+      defaultEnd = endIndex
+      self.startFrameSpinBox.blockSignals(True)
+      self.startFrameSpinBox.value = defaultStart
+      self.startFrameSpinBox.blockSignals(False)
+      if not getattr(self, "_endEdited", False):
+        self.endFrameSpinBox.blockSignals(True)
+        self.endFrameSpinBox.value = defaultEnd
+        self.endFrameSpinBox.blockSignals(False)
+      endVal = self.endFrameSpinBox.value
+      if endVal < defaultStart:
+        self.endFrameSpinBox.blockSignals(True)
+        self.endFrameSpinBox.value = defaultStart
+        self.endFrameSpinBox.blockSignals(False)
+      elif endVal > endIndex:
+        self.endFrameSpinBox.blockSignals(True)
+        self.endFrameSpinBox.value = endIndex
+        self.endFrameSpinBox.blockSignals(False)
+
+    def activate(self):
+      self._parameterNodeObserver = None
+      p = self.scriptedEffect.parameterSetNode()
+      if p:
+        self._parameterNodeObserver = p.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onParameterNodeModified)
+      self.updatePropagationUi()
+      # Observe sequence browser selection change (timepoint change)
+      self._browserObserver = None
+      parameterNode = self.scriptedEffect.parameterSetNode()
+      segNode = parameterNode.GetSegmentationNode() if parameterNode else None
+      seqNode = self.getSegmentationSequenceNode(segNode) if segNode else None
+      browser = slicer.modules.sequences.logic().GetFirstBrowserNodeForSequenceNode(seqNode) if seqNode else None
+      self._observedBrowserNode = browser
+      if browser:
+        self._browserObserver = browser.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onParameterNodeModified)
+
+    def deactivate(self):
+      for sliceWidget, pipeline in self.dragPipelines.items():
+        self.scriptedEffect.removeActor2D(sliceWidget, pipeline.actor)
+      self.dragPipelines = {}
+      p = self.scriptedEffect.parameterSetNode()
+      if p and hasattr(self, "_parameterNodeObserver") and self._parameterNodeObserver:
+        p.RemoveObserver(self._parameterNodeObserver)
+        self._parameterNodeObserver = None
+      # remove browser observer
+      if hasattr(self, "_observedBrowserNode") and self._observedBrowserNode and hasattr(self, "_browserObserver") and self._browserObserver:
+        self._observedBrowserNode.RemoveObserver(self._browserObserver)
+        self._browserObserver = None
+        self._observedBrowserNode = None
+
+    def _onParameterNodeModified(self, caller=None, event=None):
+      self.updatePropagationUi()
+
+
 
 
 
@@ -257,75 +450,28 @@ class DragPipeline:
                 segmentationNode, selectedSegmentID, segLabelmap
         )
 
-        # segment = segmentation.GetSegment(selectedSegmentID)
-        # if not segment:
-        #     logging.warning(f"Segment {selectedSegmentID} not found")
-        #     return
-
-        # repName = slicer.vtkSegmentationConverter.GetSegmentationBinaryLabelmapRepresentationName()
-        # if not segment.GetRepresentation(repName):
-        #     logging.warning(f"Segment {selectedSegmentID} has no binary labelmap representation")
-        #     return
-        #
-        # segLabelmap = slicer.vtkOrientedImageData.SafeDownCast(segment.GetRepresentation(repName))
-        # if segLabelmap is None:
-        #     logging.warning(f"Failed to retrieve vtkOrientedImageData for segment {selectedSegmentID}")
-        #     return
-        #
-        # if segLabelmap.GetDimensions()[0] == 0:
-        #     # Segment is empty
-        #     return
-
         # # Build a world-space/ RAS translation transform
         transform = vtk.vtkTransform()
-        transform.Identity()
         transform.Translate(self.translationVectorRAS)
-        # Invert
-        inverseTransform = vtk.vtkTransform()
-        inverseTransform.DeepCopy(transform)
-        inverseTransform.Inverse()
-
-        ijkToRasMatrix = vtk.vtkMatrix4x4()
-        segLabelmap.GetImageToWorldMatrix(ijkToRasMatrix)
-        rasToIjkMatrix = vtk.vtkMatrix4x4()
-        vtk.vtkMatrix4x4.Invert(ijkToRasMatrix, rasToIjkMatrix)
-        rasTransform = vtk.vtkTransform()
-        rasTransform.Translate(self.translationVectorRAS)
-
-        ijkTransform = vtk.vtkGeneralTransform()
-        ijkTransform.Concatenate(rasToIjkMatrix)
-        ijkTransform.Concatenate(rasTransform)
-        ijkTransform.Concatenate(ijkToRasMatrix)
-        ijkTransform.Inverse()
-
 
         slicer.vtkOrientedImageDataResample.TransformOrientedImage(
                         segLabelmap,
-                        ijkTransform # transform
+                        transform
                     )
 
-        # reslice = vtk.vtkImageReslice()
-        # reslice.SetInputData(segLabelmap)
-        # reslice.SetResliceTransform(ijkTransform)
-        # reslice.SetInterpolationModeToNearestNeighbor()
-        # # reslice.SetOutputSpacing(segLabelmap.GetSpacing())
-        # # reslice.SetOutputOrigin(segLabelmap.GetOrigin())
-        # # reslice.SetOutputExtent(segLabelmap.GetExtent())
-        # reslice.Update()
-
-
-        # reslicedImage = reslice.GetOutput()
+        # self.scriptedEffect.saveStateForUndo()
         #
-        # translatedLabelmap = slicer.vtkOrientedImageData()
-        # translatedLabelmap.DeepCopy(reslicedImage)
-        # translatedLabelmap.CopyDirections(segLabelmap)
-
+        # slicer.vtkSlicerSegmentationsModuleLogic.SetBinaryLabelmapToSegment(
+        #     segLabelmap, segmentationNode, selectedSegmentID, slicer.vtkSlicerSegmentationsModuleLogic.MODE_REPLACE
+        # )
         self.scriptedEffect.saveStateForUndo()
-        # self.scriptedEffect.modifySelectedSegmentByLabelmap(translatedLabelmap, slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeSet)
-
         slicer.vtkSlicerSegmentationsModuleLogic.SetBinaryLabelmapToSegment(
-            segLabelmap, segmentationNode, selectedSegmentID, slicer.vtkSlicerSegmentationsModuleLogic.MODE_REPLACE
+            segLabelmap,
+            segmentationNode,
+            selectedSegmentID,
+            slicer.vtkSlicerSegmentationsModuleLogic.MODE_REPLACE
         )
+
         self.resetGeometry()
         self.sliceWidget.sliceView().scheduleRender()
 
