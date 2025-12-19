@@ -152,16 +152,28 @@ If the segmentation is part of a sequence, you can copy the <b>current segment</
         pipeline.positionActors()
         return abortEvent
 
-    def getSegmentationSequenceNode(self, segmentationNode):
-      scene = slicer.mrmlScene
-      sequenceNodes = scene.GetNodesByClass("vtkMRMLSequenceNode")
-      sequenceNodes.UnRegister(scene)
-      for i in range(sequenceNodes.GetNumberOfItems()):
-        seqNode = sequenceNodes.GetItemAsObject(i)
-        dataNode = seqNode.GetNthDataNode(0)
-        if dataNode and dataNode.GetID() == segmentationNode.GetID():
-          return seqNode
-      return None
+    def getSequenceAndBrowserForSegmentation(self, segmentationNode):
+        if not segmentationNode:
+            return None, None
+
+        scene = slicer.mrmlScene
+        browsers = scene.GetNodesByClass("vtkMRMLSequenceBrowserNode")
+        browsers.UnRegister(scene)
+
+        for i in range(browsers.GetNumberOfItems()):
+            browser = browsers.GetItemAsObject(i)
+
+            sequenceNodes = vtk.vtkCollection()
+            browser.GetSynchronizedSequenceNodes(sequenceNodes)
+
+            for j in range(sequenceNodes.GetNumberOfItems()):
+                sequenceNode = sequenceNodes.GetItemAsObject(j)
+
+                proxy = browser.GetProxyNode(sequenceNode)
+                if proxy == segmentationNode:
+                    return sequenceNode, browser
+
+        return None, None
 
     def onPropagateButtonClicked(self):
       parameterNode = self.scriptedEffect.parameterSetNode()
@@ -169,10 +181,9 @@ If the segmentation is part of a sequence, you can copy the <b>current segment</
       segmentID = parameterNode.GetSelectedSegmentID()
       if not segmentationNode or not segmentID:
         return
-      sequenceNode = self.getSegmentationSequenceNode(segmentationNode)
+      sequenceNode, browser = self.getSequenceAndBrowserForSegmentation(segmentationNode)
       if not sequenceNode:
         return
-      browser = slicer.modules.sequences.logic().GetFirstBrowserNodeForSequenceNode(sequenceNode)
       if not browser:
         return
       sourceIndex = browser.GetSelectedItemNumber()
@@ -241,8 +252,7 @@ If the segmentation is part of a sequence, you can copy the <b>current segment</
         self.endFrameSpinBox.enabled = False
         return
 
-      sequenceNode = self.getSegmentationSequenceNode(segmentationNode)
-      browser = slicer.modules.sequences.logic().GetFirstBrowserNodeForSequenceNode(sequenceNode) if sequenceNode else None
+      sequenceNode, browser = self.getSequenceAndBrowserForSegmentation(segmentationNode)
 
       if not (sequenceNode and browser):
         # Disable everything if no corresponding sequence/browser
@@ -255,6 +265,7 @@ If the segmentation is part of a sequence, you can copy the <b>current segment</
       if getattr(self, "_observedBrowserNode", None) != browser:
         self._observedBrowserNode = browser
         self._endEdited = False
+
       self.propagateButton.enabled = True
       self.startFrameSpinBox.enabled = True
       self.endFrameSpinBox.enabled = True
@@ -291,8 +302,7 @@ If the segmentation is part of a sequence, you can copy the <b>current segment</
       self._browserObserver = None
       parameterNode = self.scriptedEffect.parameterSetNode()
       segNode = parameterNode.GetSegmentationNode() if parameterNode else None
-      seqNode = self.getSegmentationSequenceNode(segNode) if segNode else None
-      browser = slicer.modules.sequences.logic().GetFirstBrowserNodeForSequenceNode(seqNode) if seqNode else None
+      seqNode, browser = self.getSequenceAndBrowserForSegmentation(segNode)
       self._observedBrowserNode = browser
       if browser:
         self._browserObserver = browser.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onParameterNodeModified)
